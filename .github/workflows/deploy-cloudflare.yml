@@ -39,6 +39,37 @@ jobs:
           fi
           grep -n "database_id" wrangler.toml
 
+      # 预检：把「缺少 token / 账号 ID / D1 未创建」翻译成可操作的提示，
+      # 否则 wrangler 只会抛 “non-interactive environment” 这类难定位的原始报错
+      - name: Preflight checks
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=0
+
+          if [ -z "$CF_TOKEN" ]; then
+            echo "::error title=缺少 CLOUDFLARE_API_TOKEN::仓库 Settings -> Secrets and variables -> Actions 添加 CLOUDFLARE_API_TOKEN，权限需含 Workers Scripts:Edit 与 D1:Edit"
+            missing=1
+          fi
+
+          if [ -z "$CF_ACCOUNT" ]; then
+            echo "::error title=缺少 CLOUDFLARE_ACCOUNT_ID::添加 CLOUDFLARE_ACCOUNT_ID（Cloudflare Dashboard 右侧栏，或本地运行 npx wrangler whoami 查看）"
+            missing=1
+          fi
+
+          if grep -q 'REPLACE_WITH_D1_DATABASE_ID' wrangler.toml; then
+            echo "::error title=D1 数据库未创建::先运行 npx wrangler@4 d1 create zhuliji-db，把返回的 database_id 填入 wrangler.toml 并提交；或添加 D1_DATABASE_ID Secret"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "配置不完整，已中止部署（未向 Cloudflare 发起任何请求）。"
+            exit 1
+          fi
+
+          echo "预检通过：token / account / D1 配置齐全"
+
       # 第一步：发布 Worker（Worker 不存在时也能创建）
       - name: Deploy worker
         id: deploy
@@ -78,11 +109,19 @@ jobs:
         env:
           URL: ${{ steps.deploy.outputs.url }}
         run: |
-          if [ -z "$URL" ]; then
-            echo "未解析到 workers.dev 地址（可能已绑定自定义域名），跳过 HTTP 检查"
-            exit 0
+          if [ -n "$URL" ]; then
+            echo "检查 workers.dev：$URL"
+            curl -sS -o /dev/null -w "首页 %{http_code}\n" "$URL/" || true
+            curl -sS "$URL/api/products" | head -c 200 || true
+            echo
+          else
+            echo "未解析到 workers.dev 地址（已绑定自定义域名），跳过 workers.dev 检查"
           fi
-          echo "检查 $URL"
-          curl -sS -o /dev/null -w "首页 %{http_code}\n" "$URL/" || true
-          curl -sS "$URL/api/products" | head -c 200 || true
-          echo
+
+          # 自定义域名：首次绑定需 1-3 分钟签发证书，522/526 不视为失败
+          DOMAIN="$(sed -n 's/^pattern *= *"\(.*\)"/\1/p' wrangler.toml | head -1)"
+          if [ -n "$DOMAIN" ]; then
+            echo "检查自定义域名：https://$DOMAIN"
+            curl -sS -o /dev/null -w "首页 %{http_code}\n" "https://$DOMAIN/" || true
+            echo "（首次部署若返回 522/526，说明证书仍在签发，稍后刷新即可）"
+          fi

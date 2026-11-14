@@ -1064,13 +1064,13 @@ async function api(request, env) {
     const merchantTransactionId = Date.now().toString() + Math.floor(Math.random() * 100000).toString().padStart(5, '0');
     const country = lianlianCountryCode(order.customer.country);
     const customerName = splitCustomerName(order.customer.fullName);
-    const siteUrl = env.LIANLIAN_SITE_URL || new URL('/', request.url).origin;
+    const siteUrl = (env.LIANLIAN_SITE_URL || new URL('/', request.url).origin).replace(/\/+$/, '');
     const paymentBody = {
       merchant_transaction_id: merchantTransactionId,
       merchant_id: env.LIANLIAN_MERCHANT_ID,
-      notification_url: new URL('/api/lianlian/notify', request.url).toString(),
-      redirect_url: new URL('/?payment=success&order_id=' + encodeURIComponent(order.id), request.url).toString(),
-      cancel_url: new URL('/?payment=cancelled&order_id=' + encodeURIComponent(order.id), request.url).toString(),
+      notification_url: siteUrl + '/api/lianlian/notify',
+      redirect_url: siteUrl + '/?payment=success&order_id=' + encodeURIComponent(order.id),
+      cancel_url: siteUrl + '/?payment=cancelled&order_id=' + encodeURIComponent(order.id),
       country: country,
       payment_method: 'inter_credit_card',
       additional_info: JSON.stringify({ site_url: siteUrl }),

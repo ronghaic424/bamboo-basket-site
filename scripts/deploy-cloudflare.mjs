@@ -107,6 +107,19 @@ function checkAuth() {
       '本地请先运行：npx wrangler login\n或在环境变量中设置 CLOUDFLARE_API_TOKEN 与 CLOUDFLARE_ACCOUNT_ID'
     );
   }
+  // 非交互终端（脚本 / CI / 无 TTY）不会弹 OAuth 登录，必须靠 token
+  if (/non-interactive environment|CLOUDFLARE_API_TOKEN environment variable/i.test(out)) {
+    die(
+      '当前是非交互环境，wrangler 无法走浏览器登录',
+      '二选一：\n' +
+        '  1) 在终端里手动执行一次 npx wrangler login（需要能打开浏览器）\n' +
+        '  2) 设置环境变量后重试：\n' +
+        '     export CLOUDFLARE_API_TOKEN=你的token\n' +
+        '     export CLOUDFLARE_ACCOUNT_ID=你的account_id\n' +
+        '     npm run deploy:cf\n' +
+        '  token 创建：https://dash.cloudflare.com/profile/api-tokens（权限需含 Workers Scripts:Edit、D1:Edit）'
+    );
+  }
   const account = (out.match(/[a-f0-9]{32}/i) || [])[0] || '';
   c.ok('已认证' + (account ? '（account: ' + account.slice(0, 8) + '…）' : ''));
 }
@@ -196,13 +209,26 @@ function putSecrets() {
   }
 }
 
-/** 步骤 4：可选，把正式域名写入 vars.LIANLIAN_SITE_URL */
+/** 读取 wrangler.toml 里 [[routes]] 配置的自定义域名（如 shop.naturalbamboo.app） */
+function customDomain() {
+  const match = readConfig().match(/\[\[routes\]\][\s\S]*?pattern\s*=\s*"([^"]+)"/);
+  if (!match) return '';
+  return match[1].replace(/\/\*$/, '').replace(/^https?:\/\//, '').trim();
+}
+
+/** 步骤 4：把正式域名写入 vars.LIANLIAN_SITE_URL（SITE_URL 优先，否则用 [[routes]] 的域名） */
 function patchSiteUrl() {
-  const siteUrl = String(process.env.SITE_URL || '').trim();
-  if (!siteUrl) return;
+  const explicit = String(process.env.SITE_URL || '').trim();
+  const domain = customDomain();
+  const siteUrl = explicit || (domain ? 'https://' + domain : '');
+  if (!siteUrl) {
+    c.warn('未配置站点域名，跳过 LIANLIAN_SITE_URL（支付回调将退化使用请求域名）');
+    return;
+  }
   c.step('写入站点地址 LIANLIAN_SITE_URL');
-  patchConfig([/(LIANLIAN_SITE_URL\s*=\s*")[^"]*(")/, '$1' + siteUrl.replace(/\/$/, '') + '$2']);
-  c.ok('已写入：' + siteUrl);
+  const cleaned = siteUrl.replace(/\/$/, '');
+  const changed = patchConfig([/(LIANLIAN_SITE_URL\s*=\s*")[^"]*(")/, '$1' + cleaned + '$2']);
+  c.ok((changed ? '已写入：' : '已是当前值：') + cleaned);
 }
 
 /** 步骤 5：部署 */
@@ -221,25 +247,41 @@ function deploy() {
   c.ok('完成，用时 ' + seconds + 's');
 
   const url = (out.match(/https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev/i) || [])[0];
+  const domain = customDomain();
+  if (domain) c.ok('自定义域名：https://' + domain);
   return url;
 }
 
-/** 步骤 6：部署后健康检查 */
+/** 步骤 6：部署后健康检查（自定义域名优先，证书未就绪时降级提示） */
 async function healthCheck(url) {
-  if (!url || DRY_RUN) return;
-  c.step('健康检查 ' + url);
-  try {
-    const home = await fetch(url + '/', { headers: { 'user-agent': 'deploy-script' } });
-    c.ok('首页 HTTP ' + home.status);
-    const api = await fetch(url + '/api/products', { headers: { 'user-agent': 'deploy-script' } });
-    const data = await api.json();
-    const count = Array.isArray(data.products) ? data.products.length : 0;
-    c.ok('商品接口 HTTP ' + api.status + '，返回 ' + count + ' 件商品');
-    console.log('\n  商城前台：' + url + '/');
-    console.log('  后台管理：' + url + '/admin\n');
-  } catch (err) {
-    c.warn('健康检查失败：' + err.message + '（部署本身可能已成功，稍后浏览器访问确认）');
+  if (DRY_RUN) return;
+  const domain = customDomain();
+  const targets = [];
+  if (domain) targets.push('https://' + domain);
+  if (url) targets.push(url);
+  if (!targets.length) return;
+
+  for (const base of targets) {
+    c.step('健康检查 ' + base);
+    try {
+      const home = await fetch(base + '/', { headers: { 'user-agent': 'deploy-script' } });
+      c.ok('首页 HTTP ' + home.status);
+      const api = await fetch(base + '/api/products', { headers: { 'user-agent': 'deploy-script' } });
+      const data = await api.json();
+      const count = Array.isArray(data.products) ? data.products.length : 0;
+      c.ok('商品接口 HTTP ' + api.status + '，返回 ' + count + ' 件商品');
+    } catch (err) {
+      c.warn(
+        '健康检查失败：' + err.message +
+          (domain ? '（自定义域名首次绑定需要 1-3 分钟签发证书，稍后重试即可）' : '')
+      );
+    }
   }
+
+  const primary = (domain ? 'https://' + domain : url).replace(/\/$/, '');
+  console.log('\n  商城前台：' + primary + '/');
+  console.log('  后台管理：' + primary + '/admin');
+  console.log('  支付回调：' + primary + '/api/lianlian/notify\n');
 }
 
 async function main() {
@@ -261,12 +303,17 @@ async function main() {
   }
 
   if (!DRY_RUN) {
+    const domain = customDomain();
+    const base = domain ? 'https://' + domain : 'https://你的域名';
     console.log(
       '\n\x1b[1m后续检查清单\x1b[0m\n' +
         '  1. 首次访问会自动建表并写入 6 件示例商品（D1 无需手动迁移）\n' +
-        '  2. 用 ADMIN_EMAIL / ADMIN_PASSWORD 登录 /admin 确认后台可用\n' +
-        '  3. 连连商户后台确认异步通知地址为 https://你的域名/api/lianlian/notify\n' +
-        '  4. LIANLIAN_ENV 已设为 production（沙箱调试时改成 sandbox 并重新部署）\n'
+        '  2. 用 ADMIN_EMAIL / ADMIN_PASSWORD 登录 ' + base + '/admin 确认后台可用\n' +
+        '  3. 连连商户后台把异步通知地址登记为 ' + base + '/api/lianlian/notify\n' +
+        '  4. LIANLIAN_ENV 已设为 production（沙箱调试时改成 sandbox 并重新部署）\n' +
+        (domain
+          ? '  5. 自定义域名 ' + domain + ' 首次绑定需 1-3 分钟签发证书，期间访问报 522/526 属正常\n'
+          : '  5. 尚未配置自定义域名，可在 wrangler.toml 的 [[routes]] 中添加\n')
     );
   }
 }

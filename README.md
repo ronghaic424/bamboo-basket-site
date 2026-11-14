@@ -198,6 +198,26 @@ npm run deploy:cf        # 认证 → 建库 → 部署 → 写密钥 → 健康
 
 建表与种子数据由 Worker 首次请求时自动完成，**D1 不需要手动跑迁移**。
 
+### 自定义域名（shop.naturalbamboo.app）
+
+`wrangler.toml` 已绑定：
+
+```toml
+[[routes]]
+pattern = "shop.naturalbamboo.app"
+custom_domain = true
+```
+
+`custom_domain = true` 的含义是：Cloudflare 自动创建该子域的 DNS 记录并签发证书，**不需要手动加 CNAME**。前提只有一条 —— `naturalbamboo.app` 这个 zone 已在**当前部署所用的同一个 Cloudflare 账号**下（`wrangler whoami` 里列出的账号）。
+
+要点：
+
+- 首次部署后证书签发需要 1-3 分钟，期间访问可能报 **522 / 526**，属正常现象，稍后刷新即可。
+- `[vars]` 里 `LIANLIAN_SITE_URL = "https://shop.naturalbamboo.app"` 是支付回调的基准地址，代码据此拼出 `notification_url` / `redirect_url` / `cancel_url`，**即使从 workers.dev 域名下单也不会串域**。
+- workers.dev 地址默认仍然可用；若要只保留自定义域名，可加 `workers_dev = false`。
+- 若域名是在别的账号或注册商：先在 Cloudflare 添加站点并把 NS 指过去，等 zone 状态变 Active，再重新 `npm run deploy:cf`。
+- 连连商户后台的异步通知地址填：`https://shop.naturalbamboo.app/api/lianlian/notify`。
+
 ### GitHub Actions 自动部署
 
 仓库已包含 `.github/workflows/deploy-cloudflare.yml`，推送到 `main` 即自动部署。需在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加：
@@ -210,13 +230,22 @@ npm run deploy:cf        # 认证 → 建库 → 部署 → 写密钥 → 健康
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 后台账号 |
 | `LIANLIAN_MERCHANT_ID` / `LIANLIAN_PRIVATE_KEY` / `LIANLIAN_PUBLIC_KEY` | 连连配置 |
 
-工作流会先做产物校验，再用 `cloudflare/wrangler-action` 部署并写入上述 Secret，最后对线上地址做一次 HTTP 检查。
+工作流顺序：产物校验 → 填充 D1 ID → **预检（缺配置直接给出可操作提示）** → `wrangler deploy` → 逐个 `wrangler secret put` → 线上 HTTP 检查。Secret 必须在 Worker 存在之后才能写入，所以这里没用 `cloudflare/wrangler-action`，而是显式两步执行。
+
+### 常见部署报错
+
+| 报错 | 原因 | 处理 |
+| --- | --- | --- |
+| `In a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN` | CI 里没有 token，wrangler 无法走浏览器登录 | 添加 `CLOUDFLARE_API_TOKEN` Secret；本地则在终端执行 `npx wrangler login` |
+| `Couldn't find a D1 DB with the name or binding 'DB'` / 提示 `database_id` 非法 | `wrangler.toml` 里还是 `REPLACE_WITH_D1_DATABASE_ID` 占位符 | 先建库：`npx wrangler@4 d1 create zhuliji-db`，把返回的 UUID 填入 `wrangler.toml` 并提交；或加 `D1_DATABASE_ID` Secret |
+| `Authentication error [code: 10000]` | token 权限不足或已失效 | 重新生成 token，勾 `Workers Scripts:Edit` + `D1:Edit`（+ `Account Settings:Read`） |
+| `refusing to allow a Personal Access Token to create or update workflow` | 推 `.github/workflows/*` 时 GitHub token 缺 `workflow` 权限 | 重新生成 PAT，勾选 `workflow` scope |
 
 ### 部署后确认
 
-1. 访问 `https://<worker>.workers.dev/`，确认首页、商品详情、多语言切换正常；
-2. 用 `ADMIN_EMAIL` / `ADMIN_PASSWORD` 登录 `/admin`，商品与订单管理可用；
-3. 连连商户后台把异步通知地址登记为 `https://你的域名/api/lianlian/notify`；
+1. 访问 `https://shop.naturalbamboo.app/`（证书签发前可先用 workers.dev 地址），确认首页、商品详情、多语言切换正常；
+2. 用 `ADMIN_EMAIL` / `ADMIN_PASSWORD` 登录 `https://shop.naturalbamboo.app/admin`，商品与订单管理可用；
+3. 连连商户后台把异步通知地址登记为 `https://shop.naturalbamboo.app/api/lianlian/notify`；
 4. 沙箱联调时把 `LIANLIAN_ENV` 改为 `sandbox` 并重新部署，验收通过后再切 `production`。
 
 ### 体积提示
