@@ -304,7 +304,15 @@ async function openDb(env) {
         const statement = d1.prepare(sql);
         return statement.bind(...normalizeParams(params)).run();
       },
-      exec: async function (sql) { return d1.exec(sql); }
+      // D1 的 exec 按「换行」拆分语句，多行 CREATE TABLE 会被截断为 incomplete input；
+      // 统一改为按分号逐条执行（本项目 exec 只用于 SCHEMA/ALTER，语句中不含分号字面量）
+      exec: async function (sql) {
+        const statements = String(sql).split(';').map(function (s) { return s.trim(); }).filter(Boolean);
+        for (let i = 0; i < statements.length; i++) {
+          await d1.prepare(statements[i]).run();
+        }
+        return null;
+      }
     };
   }
 
