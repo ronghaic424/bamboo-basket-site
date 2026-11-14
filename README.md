@@ -160,14 +160,25 @@ node --env-file=.env preview.mjs
 
 ### 一次性准备
 
-1. 登录 Cloudflare（二选一）：
+1. 安装依赖并登录 Cloudflare（二选一）：
 
    ```bash
-   npx wrangler login                       # 浏览器授权，凭证存在本地
+   npm install                              # wrangler 已列为 devDependency，装完即用本地 CLI
+   npm run cf:login                         # 浏览器授权，凭证存在本地
    # 或在 .env / CI 里设置 CLOUDFLARE_API_TOKEN 与 CLOUDFLARE_ACCOUNT_ID
    ```
 
    API Token 权限需要 `Workers Scripts:Edit`、`D1:Edit`、`Account Settings:Read`。
+
+   常用命令：
+
+   | 命令 | 作用 |
+   | --- | --- |
+   | `npm run cf:whoami` | 查看当前登录账号（含 Account ID） |
+   | `npm run cf:db:create` | 创建 D1 数据库 `zhuliji-db` 并打印 `database_id` |
+   | `npm run cf:dev` | 用 Cloudflare 运行时本地调试（D1 走本地模拟） |
+   | `npm run cf:tail` | 实时查看线上 Worker 日志 |
+   | `npm run deploy:cf` | 一键部署（建库 → 部署 → 写密钥 → 健康检查） |
 
 2. 准备部署变量（本地可 `cp .env.example .env` 后填入）：
 
@@ -236,8 +247,9 @@ custom_domain = true
 
 | 报错 | 原因 | 处理 |
 | --- | --- | --- |
-| `In a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN` | CI 里没有 token，wrangler 无法走浏览器登录 | 添加 `CLOUDFLARE_API_TOKEN` Secret；本地则在终端执行 `npx wrangler login` |
-| `Couldn't find a D1 DB with the name or binding 'DB'` / 提示 `database_id` 非法 | `wrangler.toml` 里还是 `REPLACE_WITH_D1_DATABASE_ID` 占位符 | 先建库：`npx wrangler@4 d1 create zhuliji-db`，把返回的 UUID 填入 `wrangler.toml` 并提交；或加 `D1_DATABASE_ID` Secret |
+| `In a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN` | CI 里没有 token，wrangler 无法走浏览器登录 | 添加 `CLOUDFLARE_API_TOKEN` Secret；本地则在终端执行 `npm run cf:login` |
+| `Couldn't find a D1 DB with the name or binding 'DB'` / 提示 `database_id` 非法 | `wrangler.toml` 里还是 `REPLACE_WITH_D1_DATABASE_ID` 占位符 | 先建库：`npm run cf:db:create`，把返回的 UUID 填入 `wrangler.toml` 并提交；或加 `D1_DATABASE_ID` Secret |
+| `npm error canceled`（npx 执行 wrangler 时） | `npx` 需要临时下载包，卡在「Ok to proceed?」确认或没有交互终端 | `npm install` 装好本地 wrangler 后改用 `npm run cf:*` 系列命令，不再走 npx 下载 |
 | `Authentication error [code: 10000]` | token 权限不足或已失效 | 重新生成 token，勾 `Workers Scripts:Edit` + `D1:Edit`（+ `Account Settings:Read`） |
 | `refusing to allow a Personal Access Token to create or update workflow` | 推 `.github/workflows/*` 时 GitHub token 缺 `workflow` 权限 | 重新生成 PAT，勾选 `workflow` scope |
 

@@ -16,7 +16,7 @@
  *   SITE_URL                可选，正式域名，写入 LIANLIAN_SITE_URL
  *
  * 鉴权：
- *   本地  -> 先执行 `npx wrangler login`，或设置 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
+ *   本地  -> 先执行 `npm run cf:login`，或设置 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
  *   CI    -> 设置 CLOUDFLARE_API_TOKEN（含 Workers Scripts:Edit + D1:Edit 权限）与 CLOUDFLARE_ACCOUNT_ID
  */
 import { spawnSync } from 'node:child_process';
@@ -54,9 +54,10 @@ function die(msg, hint) {
   process.exit(1);
 }
 
-/** 优先用本地安装的 wrangler，没有则用 npx 临时拉取 */
+/** 优先用本地安装的 wrangler，没有则用 npx 临时拉取
+ *  WRANGLER_BIN 可覆盖（自测/特殊环境用，例如指向一个 stub） */
 const localWrangler = path.join(ROOT, 'node_modules', '.bin', 'wrangler');
-const WRANGLER = existsSync(localWrangler) ? localWrangler : null;
+const WRANGLER = process.env.WRANGLER_BIN || (existsSync(localWrangler) ? localWrangler : null);
 
 function wrangler(wranglerArgs, options = {}) {
   const cmd = WRANGLER || 'npx';
@@ -104,7 +105,7 @@ function checkAuth() {
   if (/not authenticated|You are not authenticated/i.test(out)) {
     die(
       '未登录 Cloudflare',
-      '本地请先运行：npx wrangler login\n或在环境变量中设置 CLOUDFLARE_API_TOKEN 与 CLOUDFLARE_ACCOUNT_ID'
+      '本地请先运行：npm run cf:login\n或在环境变量中设置 CLOUDFLARE_API_TOKEN 与 CLOUDFLARE_ACCOUNT_ID'
     );
   }
   // 非交互终端（脚本 / CI / 无 TTY）不会弹 OAuth 登录，必须靠 token
@@ -112,7 +113,7 @@ function checkAuth() {
     die(
       '当前是非交互环境，wrangler 无法走浏览器登录',
       '二选一：\n' +
-        '  1) 在终端里手动执行一次 npx wrangler login（需要能打开浏览器）\n' +
+        '  1) 在终端里手动执行一次 npm run cf:login（会打开浏览器授权）\n' +
         '  2) 设置环境变量后重试：\n' +
         '     export CLOUDFLARE_API_TOKEN=你的token\n' +
         '     export CLOUDFLARE_ACCOUNT_ID=你的account_id\n' +
@@ -124,6 +125,23 @@ function checkAuth() {
   c.ok('已认证' + (account ? '（account: ' + account.slice(0, 8) + '…）' : ''));
 }
 
+/** 从 wrangler 的任意输出里提取 D1 database UUID
+ *  优先匹配 create 打印的 `database_id = "..."` 片段，其次匹配裸 UUID */
+function parseD1Uuid(text) {
+  const fromConfig = String(text || '').match(/database_id\s*=\s*"([^"]+)"/);
+  if (fromConfig) return fromConfig[1];
+  const generic = String(text || '').match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i);
+  return generic ? generic[0] : '';
+}
+
+/** 从 `d1 list` 的文本表格里找出同名数据库那一行的 UUID */
+function findUuidInListText(text) {
+  const row = String(text || '')
+    .split('\n')
+    .find((line) => line.includes(D1_NAME));
+  return row ? parseD1Uuid(row) : '';
+}
+
 /** 步骤 2：确保 D1 数据库存在，并把 database_id 写回 wrangler.toml */
 function ensureD1() {
   c.step('准备 D1 数据库「' + D1_NAME + '」');
@@ -131,50 +149,57 @@ function ensureD1() {
   const existingId = (config.match(/database_id\s*=\s*"([^"]+)"/) || [])[1] || '';
   const isPlaceholder = !existingId || existingId === 'REPLACE_WITH_D1_DATABASE_ID';
 
-  const listed = mustWrangler(['d1', 'list', '--json'], { allowFail: true });
-  let databases = [];
-  try {
-    const parsed = JSON.parse(listed.out.slice(listed.out.indexOf('[')));
-    databases = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    c.warn('无法解析 d1 list 输出，将尝试直接创建');
+  // 配置里已有真实 ID 就直接用，省掉两次远端查询（也避免 D1 只读权限场景报错）
+  if (!isPlaceholder) {
+    c.ok('wrangler.toml 已配置 database_id：' + existingId.slice(0, 8) + '…');
+    return;
   }
 
-  const found = databases.find((db) => db.name === D1_NAME);
-  let id = found ? found.uuid || found.id : '';
+  // 先查是否已存在。--json 在部分版本/子命令不支持，失败就退化为文本匹配
+  let id = '';
+  const listed = mustWrangler(['d1', 'list', '--json'], { allowFail: true });
+  if (listed.code === 0) {
+    try {
+      const parsed = JSON.parse(listed.out.slice(listed.out.indexOf('[')));
+      const databases = Array.isArray(parsed) ? parsed : [];
+      const found = databases.find((db) => db.name === D1_NAME);
+      id = found ? found.uuid || found.id || '' : '';
+    } catch {
+      c.warn('d1 list 输出无法解析为 JSON，改用文本匹配');
+    }
+  }
+  if (!id) {
+    id = findUuidInListText(mustWrangler(['d1', 'list'], { allowFail: true }).out);
+  }
 
+  // 不存在则创建。注意：`d1 create` 不支持 --json，UUID 从它打印的 TOML 片段里取
   if (!id && isPlaceholder) {
     c.warn('数据库中不存在，正在创建…');
-    const created = mustWrangler(['d1', 'create', D1_NAME, '--json']);
-    const jsonStart = created.out.indexOf('{');
-    try {
-      const info = JSON.parse(created.out.slice(jsonStart));
-      id = info.uuid || info.id || (info.d1_databases && info.d1_databases[0] && info.d1_databases[0].uuid) || '';
-    } catch {
-      const m = created.out.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
-      id = m ? m[1] : '';
+    const created = mustWrangler(['d1', 'create', D1_NAME], { allowFail: true });
+    id = parseD1Uuid(created.out);
+
+    if (!id && /already exists/i.test(created.out)) {
+      c.warn('同名数据库已存在（可能是并发创建），重新读取列表');
+      id = findUuidInListText(mustWrangler(['d1', 'list'], { allowFail: true }).out);
     }
+
+    if (!id) {
+      die('创建 D1 数据库失败', created.out.trim().split('\n').slice(-12).join('\n'));
+    }
+    c.ok('已创建数据库 ' + D1_NAME);
   }
 
   if (!id) {
-    if (!isPlaceholder) {
-      c.ok('wrangler.toml 已配置 database_id：' + existingId.slice(0, 8) + '…');
-      return;
-    }
     die(
       '未能获取 D1 database_id',
-      '请到 Cloudflare 控制台 → Workers & Pages → D1 手动创建数据库「' + D1_NAME + '」，\n' +
+      '请先执行：npm run cf:db:create（或到 Cloudflare 控制台 → Workers & Pages → D1 手动创建「' + D1_NAME + '」）\n' +
         '再把 database_id 填进 wrangler.toml 的 [[d1_databases]] 段后重试。'
     );
   }
 
-  if (isPlaceholder) {
-    patchConfig([[/(database_id\s*=\s*")[^"]*(")/, '$1' + id + '$2']]);
-    c.ok('已创建数据库并写入 wrangler.toml：' + id.slice(0, 8) + '…');
-    c.warn('请把更新后的 wrangler.toml 提交到 Git 仓库，供 CI 复用');
-  } else {
-    c.ok('数据库已存在：' + id.slice(0, 8) + '…');
-  }
+  patchConfig([[/(database_id\s*=\s*")[^"]*(")/, '$1' + id + '$2']]);
+  c.ok('已写入 wrangler.toml：database_id = ' + id);
+  c.warn('请把更新后的 wrangler.toml 提交到 Git 仓库，供 CI 复用');
 }
 
 /** 步骤 3：写入敏感变量（Values 走 toml，Secret 走 wrangler secret put） */
@@ -227,7 +252,7 @@ function patchSiteUrl() {
   }
   c.step('写入站点地址 LIANLIAN_SITE_URL');
   const cleaned = siteUrl.replace(/\/$/, '');
-  const changed = patchConfig([/(LIANLIAN_SITE_URL\s*=\s*")[^"]*(")/, '$1' + cleaned + '$2']);
+  const changed = patchConfig([[/LIANLIAN_SITE_URL\s*=\s*"[^"]*"/, 'LIANLIAN_SITE_URL = "' + cleaned + '"']]);
   c.ok((changed ? '已写入：' : '已是当前值：') + cleaned);
 }
 
@@ -262,7 +287,8 @@ async function healthCheck(url) {
   if (!targets.length) return;
 
   for (const base of targets) {
-    c.step('健康检查 ' + base);
+    const isCustomDomain = Boolean(domain) && base === 'https://' + domain;
+    c.step('健康检查 ' + base + (isCustomDomain ? '（自定义域名）' : ''));
     try {
       const home = await fetch(base + '/', { headers: { 'user-agent': 'deploy-script' } });
       c.ok('首页 HTTP ' + home.status);
@@ -273,7 +299,7 @@ async function healthCheck(url) {
     } catch (err) {
       c.warn(
         '健康检查失败：' + err.message +
-          (domain ? '（自定义域名首次绑定需要 1-3 分钟签发证书，稍后重试即可）' : '')
+          (isCustomDomain ? '（首次绑定需 1-3 分钟签发证书，稍后刷新即可）' : '（部署本身可能已成功，稍后浏览器确认）')
       );
     }
   }

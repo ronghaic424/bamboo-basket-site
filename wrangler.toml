@@ -37,6 +37,6 @@ custom_domain = true
 [[d1_databases]]
 binding = "DB"
 database_name = "zhuliji-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "277538bf-c013-4015-88a3-ecf8ff1766ce"
 # 迁移目录（可选，本项目的建表由 Worker 首次请求时自动完成）
 # migrations_dir = "migrations"

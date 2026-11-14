@@ -9,7 +9,13 @@
     "smoke": "node --no-warnings scripts/smoke-test.mjs",
     "deploy:cf": "node scripts/deploy-cloudflare.mjs",
     "deploy:cf:dry": "node scripts/deploy-cloudflare.mjs --dry-run",
-    "cf:dev": "npx --yes wrangler@4 dev",
-    "cf:tail": "npx --yes wrangler@4 tail"
+    "cf:login": "wrangler login",
+    "cf:whoami": "wrangler whoami",
+    "cf:db:create": "wrangler d1 create zhuliji-db",
+    "cf:dev": "wrangler dev",
+    "cf:tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.162.0"
   }
 }
