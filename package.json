@@ -4,6 +4,12 @@
   "type": "module",
   "scripts": {
     "build": "bash scripts/build.sh",
-    "validate": "node scripts/validate-artifact.mjs"
+    "validate": "node scripts/validate-artifact.mjs",
+    "preview": "node --no-warnings preview.mjs",
+    "smoke": "node --no-warnings scripts/smoke-test.mjs",
+    "deploy:cf": "node scripts/deploy-cloudflare.mjs",
+    "deploy:cf:dry": "node scripts/deploy-cloudflare.mjs --dry-run",
+    "cf:dev": "npx --yes wrangler@4 dev",
+    "cf:tail": "npx --yes wrangler@4 tail"
   }
 }

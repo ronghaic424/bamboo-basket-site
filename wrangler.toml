@@ -1,0 +1,31 @@
+# 竹里集商城 · Cloudflare Workers 部署配置
+# 文档：https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "zhuliji-store"
+main = "worker/index.js"
+compatibility_date = "2024-11-01"
+
+# node:* 内置模块的兼容层（本地 node:sqlite 路径不会在 Workers 执行，
+# 但需要该 flag 让打包器正常解析 node:fs / node:crypto 等导入）
+compatibility_flags = ["nodejs_compat"]
+
+# 静态资源与 HTML 由 Worker 直接返回，不需要 assets 绑定
+
+[vars]
+# 非敏感配置：直接写在仓库里
+LIANLIAN_ENV = "production"
+# 站点对外地址（用于生成支付回调域名，留空则自动使用请求域名）
+LIANLIAN_SITE_URL = ""
+ADMIN_NAME = "竹里集管理员"
+
+# ---------------------------------------------------------------------------
+# D1 数据库绑定：Worker 通过 env.DB 访问
+# 首次部署前执行：npm run cf:db:create
+# 该命令会创建数据库并把返回的 database_id 写入下面（或手动填写）
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "zhuliji-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+# 迁移目录（可选，本项目的建表由 Worker 首次请求时自动完成）
+# migrations_dir = "migrations"

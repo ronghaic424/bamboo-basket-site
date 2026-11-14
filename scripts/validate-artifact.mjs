@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -23,3 +24,15 @@ assert.equal(
 );
 
 console.log("Artifact is valid ESM and exports default.fetch");
+
+// 内联 <script> 也要过一遍语法检查：HTML 里的脚本是拼在模板字符串里的，
+// 改动字符串拼接时容易漏掉 `+`，仅靠 ESM 解析发现不了。
+const inlineScripts = [...source.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+assert.ok(inlineScripts.length > 0, "expected at least one inline <script> block");
+inlineScripts.forEach((code, index) => {
+  assert.doesNotThrow(
+    () => new vm.Script(code, { filename: `inline-script-${index + 1}.js` }),
+    `inline script #${index + 1} has a syntax error`,
+  );
+});
+console.log(`Inline scripts OK (${inlineScripts.length})`);
